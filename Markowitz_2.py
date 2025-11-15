@@ -70,41 +70,95 @@ class MyPortfolio:
         """
         TODO: Complete Task 4 Below
         """
-        # assets 不包含 SPY
+        # 只投資於非 exclude 的資產（例如 11 個 sector ETF）
         assets = self.price.columns[self.price.columns != self.exclude]
+        dates = self.price.index
 
-        # 建立空的權重表
-        # self.portfolio_weights 已經在外面建好，index = dates, columns = all assets
+        # 參數設定：動能視窗、均線視窗、一次押幾檔 sector
+        mom_window = 252   # 約一年，用來看動能 (momentum)
+        ma_window = 200    # 約 200 日均線，用來做趨勢濾網
+        top_k = 2          # 每次只押前 2 名 sector
 
-        for i in range(self.lookback + 1, len(self.price)):
-            # 過去 lookback 天的日報酬
-            R_n = self.returns.copy()[assets].iloc[i - self.lookback : i]
+        for i, date in enumerate(dates):
 
-            # 計算每個資產的平均報酬 (mu) 與波動度 (sigma)
-            mu = R_n.mean()            # Series, index = assets
-            sigma = R_n.std(ddof=1)    # Series, index = assets
+            # 暖身期：資料不夠長，先用等權重（全部 sector 等權）
+            if i < max(mom_window, ma_window):
+                w_eq = np.ones(len(assets)) / len(assets)
+                self.portfolio_weights.loc[date, assets] = pd.Series(w_eq, index=assets)
+                continue
 
-            # 避免 sigma = 0 或 NaN
-            sigma = sigma.replace(0, np.nan)
+            # ===== 1. SPY 趨勢濾網：判斷 risk-on / risk-off =====
+            # 1-1. SPY 近一年累積報酬
+            spy_ret_window = self.returns["SPY"].iloc[i - mom_window : i]
+            spy_cum_ret = (1.0 + spy_ret_window).prod() - 1.0
 
-            # 風險調整後動能分數：Sharpe-like
-            score = mu / sigma
-            score = score.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+            # 1-2. SPY 是否站上 200 日均線
+            spy_price_window = self.price["SPY"].iloc[i - ma_window : i]
+            spy_ma = spy_price_window.mean()
+            spy_current = self.price["SPY"].iloc[i]
 
-            # 對於近期期望報酬為負的資產，直接不要
-            score[mu <= 0.0] = 0.0
+            risk_on = (spy_cum_ret > 0.0) and (spy_current > spy_ma)
 
-            if score.sum() == 0:
-                # 如果全部資產都沒有正的風險調整報酬，退回等權重
-                n = len(assets)
-                w = np.ones(n) / n
-                w = pd.Series(w, index=assets)
+            if not risk_on:
+                # Risk-off：全部退到現金（所有 sector 權重 = 0）
+                self.portfolio_weights.loc[date, assets] = 0.0
+                continue
+
+            # ===== 2. Risk-on 時做 Sector Dual Momentum =====
+            # 2-1. 計算每個 sector 過去 mom_window 天的累積報酬
+            R_mom = self.returns[assets].iloc[i - mom_window : i]
+            cum_ret = (1.0 + R_mom).prod() - 1.0   # Series, index=assets
+
+            # 只保留正動能的 sector，並依動能降冪排序
+            winners = cum_ret[cum_ret > 0.0].sort_values(ascending=False)
+
+            if len(winners) > 0:
+                # 2-2. 選出前 top_k 名贏家
+                selected = winners.head(top_k).index
+
+                # 2-3. 在較短視窗內估計波動度，用來做 inverse volatility 權重
+                R_sel = self.returns[selected].iloc[i - ma_window : i]
+                sigma_sel = R_sel.std(ddof=1).replace(0, np.nan)
+
+                inv_vol_sel = 1.0 / sigma_sel
+                inv_vol_sel = inv_vol_sel.replace(
+                    [np.inf, -np.inf], np.nan
+                ).fillna(0.0)
+
+                if inv_vol_sel.sum() == 0:
+                    # 如果全部標的的波動都算不出來，就在 selected 裡等權
+                    w_sel = pd.Series(
+                        np.ones(len(selected)) / len(selected),
+                        index=selected,
+                    )
+                else:
+                    w_sel = inv_vol_sel / inv_vol_sel.sum()
+
+                # 把 selected 的權重放進完整 assets 的權重向量，其餘為 0
+                w_full = pd.Series(0.0, index=assets)
+                w_full.loc[selected] = w_sel.values
+
             else:
-                # 權重 ∝ score
-                w = score / score.sum()
+                # 沒有任何 sector 有正動能：
+                # 改用所有 sector 做 inverse volatility（類 risk parity）
+                R_vol = self.returns[assets].iloc[i - ma_window : i]
+                sigma = R_vol.std(ddof=1).replace(0, np.nan)
 
-            # 將當天權重寫入
-            self.portfolio_weights.loc[self.price.index[i], assets] = w
+                inv_vol = 1.0 / sigma
+                inv_vol = inv_vol.replace(
+                    [np.inf, -np.inf], np.nan
+                ).fillna(0.0)
+
+                if inv_vol.sum() == 0:
+                    w_full = pd.Series(
+                        np.ones(len(assets)) / len(assets),
+                        index=assets,
+                    )
+                else:
+                    w_full = inv_vol / inv_vol.sum()
+
+            # 寫入當日權重（只對 assets；SPY 權重保持 NaN，稍後會被 fillna(0) 變成 0）
+            self.portfolio_weights.loc[date, assets] = w_full
         
         """
         TODO: Complete Task 4 Above
