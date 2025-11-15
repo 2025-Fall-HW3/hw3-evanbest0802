@@ -70,7 +70,41 @@ class MyPortfolio:
         """
         TODO: Complete Task 4 Below
         """
-        
+        # assets 不包含 SPY
+        assets = self.price.columns[self.price.columns != self.exclude]
+
+        # 建立空的權重表
+        # self.portfolio_weights 已經在外面建好，index = dates, columns = all assets
+
+        for i in range(self.lookback + 1, len(self.price)):
+            # 過去 lookback 天的日報酬
+            R_n = self.returns.copy()[assets].iloc[i - self.lookback : i]
+
+            # 計算每個資產的平均報酬 (mu) 與波動度 (sigma)
+            mu = R_n.mean()            # Series, index = assets
+            sigma = R_n.std(ddof=1)    # Series, index = assets
+
+            # 避免 sigma = 0 或 NaN
+            sigma = sigma.replace(0, np.nan)
+
+            # 風險調整後動能分數：Sharpe-like
+            score = mu / sigma
+            score = score.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+            # 對於近期期望報酬為負的資產，直接不要
+            score[mu <= 0.0] = 0.0
+
+            if score.sum() == 0:
+                # 如果全部資產都沒有正的風險調整報酬，退回等權重
+                n = len(assets)
+                w = np.ones(n) / n
+                w = pd.Series(w, index=assets)
+            else:
+                # 權重 ∝ score
+                w = score / score.sum()
+
+            # 將當天權重寫入
+            self.portfolio_weights.loc[self.price.index[i], assets] = w
         
         """
         TODO: Complete Task 4 Above

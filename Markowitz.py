@@ -62,6 +62,15 @@ class EqualWeightPortfolio:
         """
         TODO: Complete Task 1 Below
         """
+        # assets 不包含 self.exclude（例如 SPY），只對這些做等權重
+        assets = df.columns[df.columns != self.exclude]
+        n = len(assets)
+        equal_weights = np.ones(n) / n
+
+        # 在第一天設定等權重，之後會透過 ffill 延伸到所有日期
+        first_date = df.index[0]
+        self.portfolio_weights.loc[first_date, assets] = equal_weights
+        # SPY 權重保持 NaN，後面 fillna(0) 會把它變成 0
 
         """
         TODO: Complete Task 1 Above
@@ -113,8 +122,33 @@ class RiskParityPortfolio:
         """
         TODO: Complete Task 2 Below
         """
+        # assets 不包含被排除的 (SPY)
+        assets = df.columns[df.columns != self.exclude]
 
+        # 逐日用 rolling window 計算 inverse volatility 權重
+        for i in range(self.lookback + 1, len(df)):
+            # 取出過去 lookback 天的日報酬
+            R_n = df_returns.copy()[assets].iloc[i - self.lookback : i]
 
+            # 計算每個資產的波動度 (standard deviation)
+            vol = R_n.std(ddof=1)  # Series, index = assets
+
+            # 避免 division by zero 或 NaN
+            vol = vol.replace(0, np.nan)
+            inv_vol = 1.0 / vol
+            inv_vol = inv_vol.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+            if inv_vol.sum() == 0:
+                # 極端情況：全部無法計算，就退回等權重
+                n = len(assets)
+                w = np.ones(n) / n
+                w = pd.Series(w, index=assets)
+            else:
+                # inverse volatility 權重
+                w = inv_vol / inv_vol.sum()
+
+            # 將當天權重寫入該日期
+            self.portfolio_weights.loc[df.index[i], assets] = w
 
         """
         TODO: Complete Task 2 Above
@@ -187,11 +221,23 @@ class MeanVariancePortfolio:
                 """
                 TODO: Complete Task 3 Below
                 """
+                # 決策變數：每檔資產的權重 w_i
+                # 已有 ub=1，預設 lb=0 -> 0 <= w_i <= 1 (long-only, no single-name leverage)
+                w = model.addMVar(n, name="w", ub=1.0)
 
-                # Sample Code: Initialize Decision w and the Objective
-                # NOTE: You can modify the following code
-                w = model.addMVar(n, name="w", ub=1)
-                model.setObjective(w.sum(), gp.GRB.MAXIMIZE)
+                # 約束：資產總權重 = 1 (無槓桿、全額投入)
+                model.addConstr(w.sum() == 1.0, name="budget")
+
+                # 建立目標函數：
+                # maximize w^T mu - (gamma / 2) * w^T Sigma w
+                # mu, Sigma 來自 R_n 的樣本平均與共變異數
+                quad_term = w @ Sigma @ w
+                linear_term = mu @ w
+
+                model.setObjective(
+                    linear_term - 0.5 * gamma * quad_term,
+                    gp.GRB.MAXIMIZE,
+                )
 
                 """
                 TODO: Complete Task 3 Above
